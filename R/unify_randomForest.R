@@ -37,53 +37,273 @@
 #' shaps <- treeshap(unified_model, data[1:2,])
 #' # plot_contribution(shaps, obs = 1)
 #'
-randomForest.unify <- function(rf_model, data) {
-  if(!'randomForest' %in% class(rf_model)){stop('Object rf_model was not of class "randomForest"')}
-  if(any(attr(rf_model$terms, "dataClasses") != "numeric")) {
-    stop('Models built on data with categorical features are not supported - please encode them before training.')
+randomForest.unify <- function(rf_model, data, W = NULL, Y = NULL, is_grf = FALSE) {
+  if (is_grf == FALSE){
+    if(!'randomForest' %in% class(rf_model)){stop('Object rf_model was not of class "randomForest"')}
+    if(any(attr(rf_model$terms, "dataClasses") != "numeric")) {
+      stop('Models built on data with categorical features are not supported - please encode them before training.')
+    }
+    n <- rf_model$ntree
+    ret <- data.table()
+    x <- lapply(1:n, function(tree){
+      tree_data <- as.data.table(getTree(rf_model, k = tree, labelVar = TRUE)) # lv = T
+      tree_data[, c("left daughter", "right daughter", "split var", "split point", "prediction")]
+    })
+    times_vec <- sapply(x, nrow)
+    y <- rbindlist(x)
+    y[, Tree := rep(0:(n - 1), times = times_vec)]
+    y[, Node := unlist(lapply(times_vec, function(x) 0:(x - 1)))]
+    setnames(y, c("Yes", "No", "Feature", "Split",  "Prediction", "Tree", "Node"))
+    y[, Feature := as.character(Feature)]
+    y[, Yes := Yes - 1]
+    y[, No := No - 1]
+    y[y$Yes < 0, "Yes"] <- NA
+    y[y$No < 0, "No"] <- NA
+    y[, Missing := NA]
+    y[, Missing := as.integer(Missing)] # seems not, but needed
+
+    ID <- paste0(y$Node, "-", y$Tree)
+    y$Yes <- match(paste0(y$Yes, "-", y$Tree), ID)
+    y$No <- match(paste0(y$No, "-", y$Tree), ID)
+
+    y$Cover <- 0
+
+    y$Decision.type <- factor(x = rep("<=", times = nrow(y)), levels = c("<=", "<"))
+    y[is.na(Feature), Decision.type := NA]
+
+    # Here we lose "Quality" information
+    y[!is.na(Feature), Prediction := NA]
+
+    # treeSHAP assumes, that [prediction = sum of predictions of the trees]
+    # in random forest [prediction = mean of predictions of the trees]
+    # so here we correct it by adjusting leaf prediction values
+    y[is.na(Feature), Prediction := Prediction / n]
+
+
+    setcolorder(y, c("Tree", "Node", "Feature", "Decision.type", "Split", "Yes", "No", "Missing", "Prediction", "Cover"))
+
+    ret <- list(model = as.data.frame(y), data = as.data.frame(data))
+    class(ret) <- "model_unified"
+    attr(ret, "missing_support") <- FALSE
+    attr(ret, "model") <- "randomForest"
+    return(set_reference_dataset(ret, as.data.frame(data)))
+  } else {
+    if(!'causal_forest' %in% class(rf_model)){stop('Object rf_model was not of class "causal_forest"')}
+    # if(any(attr(rf_model$terms, "dataClasses") != "numeric")) {
+    #   stop('Models built on data with categorical features are not supported - please encode them before training.')
+    # }
+    n <- rf_model$'_num_trees'
+    ret <- data.table()
+    x <- lapply(1:n, function(tree){
+      cf_tree <- grf::get_tree(rf_model, index = tree)
+      tree_data <- get_cftree(cf_tree, data, W, Y)
+    })
+
+    x <- x[-which(sapply(x, is.null))]
+    cf$ntree <- length(x)
+    
+    na_idx <- c()
+    for (i in 1:length(x)){
+      if (sum( is.na( x[[i]]$prediction ) ) > 0){
+        na_idx <- c(na_idx, i)
+      }
+    }
+    
+    for (i in na_idx){
+      x[[i]] <- NULL
+    }
+    n <- length(x)
+    
+    times_vec <- sapply(x, nrow)
+    y <- rbindlist(x)
+    y[, Tree := rep(0:(n - 1), times = times_vec)]
+    y[, Node := unlist(lapply(times_vec, function(x) 0:(x - 1)))]
+    setnames(y, c("Yes", "No", "Feature", "Split",  "Prediction", "Tree", "Node"))
+    y[, Feature := as.character(Feature)]
+    y[, Yes := Yes - 1]
+    y[, No := No - 1]
+    y[y$Yes < 0, "Yes"] <- NA
+    y[y$No < 0, "No"] <- NA
+    y[, Missing := NA]
+    y[, Missing := as.integer(Missing)] # seems not, but needed
+    
+    ID <- paste0(y$Node, "-", y$Tree)
+    y$Yes <- match(paste0(y$Yes, "-", y$Tree), ID)
+    y$No <- match(paste0(y$No, "-", y$Tree), ID)
+    
+    y$Cover <- 0
+    
+    y$Decision.type <- factor(x = rep("<=", times = nrow(y)), levels = c("<=", "<"))
+    y[is.na(Feature), Decision.type := NA]
+    
+    # Here we lose "Quality" information
+    y[!is.na(Feature), Prediction := NA]
+    
+    # treeSHAP assumes, that [prediction = sum of predictions of the trees]
+    # in random forest [prediction = mean of predictions of the trees]
+    # so here we correct it by adjusting leaf prediction values
+    y[is.na(Feature), Prediction := Prediction / n]
+    
+    
+    setcolorder(y, c("Tree", "Node", "Feature", "Decision.type", "Split", "Yes", "No", "Missing", "Prediction", "Cover"))
+    
+    ret <- list(model = as.data.frame(y), data = as.data.frame(data))
+    class(ret) <- "model_unified"
+    attr(ret, "missing_support") <- FALSE
+    attr(ret, "model") <- "randomForest"
+    return(set_reference_dataset(ret, as.data.frame(data)))
   }
-  n <- rf_model$ntree
-  ret <- data.table()
-  x <- lapply(1:n, function(tree){
-    tree_data <- as.data.table(randomForest::getTree(rf_model, k = tree, labelVar = TRUE))
-    tree_data[, c("left daughter", "right daughter", "split var", "split point", "prediction")]
-  })
-  times_vec <- sapply(x, nrow)
-  y <- rbindlist(x)
-  y[, Tree := rep(0:(n - 1), times = times_vec)]
-  y[, Node := unlist(lapply(times_vec, function(x) 0:(x - 1)))]
-  setnames(y, c("Yes", "No", "Feature", "Split",  "Prediction", "Tree", "Node"))
-  y[, Feature := as.character(Feature)]
-  y[, Yes := Yes - 1]
-  y[, No := No - 1]
-  y[y$Yes < 0, "Yes"] <- NA
-  y[y$No < 0, "No"] <- NA
-  y[, Missing := NA]
-  y[, Missing := as.integer(Missing)] # seems not, but needed
-
-  ID <- paste0(y$Node, "-", y$Tree)
-  y$Yes <- match(paste0(y$Yes, "-", y$Tree), ID)
-  y$No <- match(paste0(y$No, "-", y$Tree), ID)
-
-  y$Cover <- 0
-
-  y$Decision.type <- factor(x = rep("<=", times = nrow(y)), levels = c("<=", "<"))
-  y[is.na(Feature), Decision.type := NA]
-
-  # Here we lose "Quality" information
-  y[!is.na(Feature), Prediction := NA]
-
-  # treeSHAP assumes, that [prediction = sum of predictions of the trees]
-  # in random forest [prediction = mean of predictions of the trees]
-  # so here we correct it by adjusting leaf prediction values
-  y[is.na(Feature), Prediction := Prediction / n]
-
-
-  setcolorder(y, c("Tree", "Node", "Feature", "Decision.type", "Split", "Yes", "No", "Missing", "Prediction", "Cover"))
-
-  ret <- list(model = as.data.frame(y), data = as.data.frame(data))
-  class(ret) <- "model_unified"
-  attr(ret, "missing_support") <- FALSE
-  attr(ret, "model") <- "randomForest"
-  return(set_reference_dataset(ret, as.data.frame(data)))
+  
 }
+
+get_cftree <- function(cf_tree, X, W, Y){
+  
+  # get drawn dat
+  drawn_sample_dat <- as.data.frame(X[sort(cf_tree$drawn_samples), ])
+  drawn_sample_dat$id <- sort(cf_tree$drawn_samples)
+  drawn_sample_w <- data.frame("tx" = W[sort(cf_tree$drawn_samples)])
+  drawn_sample_w$id <- sort(cf_tree$drawn_samples)
+  drawn_sample_y <- data.frame("outcome" = Y[sort(cf_tree$drawn_samples)])
+  drawn_sample_y$id <- sort(cf_tree$drawn_samples)
+  
+  # add node index in nodes
+  for (i in 1:length(cf_tree$nodes)){
+    cf_tree$nodes[[i]]$index <- i
+  }
+  
+  # add father node index in nodes
+  for (i in 1:length(cf_tree$nodes)){
+    if(cf_tree$nodes[[i]]$index == 1){
+      cf_tree$nodes[[i]]$father <- 0
+    } else {
+      for (j in 1:length(cf_tree$nodes)){
+        # if (!cf_tree$nodes[[i]]$is_leaf){
+        if (cf_tree$nodes[[i]]$index %in% c(cf_tree$nodes[[j]]$left_child, cf_tree$nodes[[j]]$right_child)){
+          cf_tree$nodes[[i]]$father <- j
+        } 
+        # }
+      }
+    }
+  }
+  
+  # add samples and corresponding tx assignment in the nodes
+  for (i in 1:length(cf_tree$nodes)){
+    if (cf_tree$nodes[[i]]$father != 0){
+      if (!cf_tree$nodes[[i]]$is_leaf){
+        father_index <- cf_tree$nodes[[i]]$father
+        father_dat <- drawn_sample_dat[drawn_sample_dat$id %in% cf_tree$nodes[[father_index]]$sample, ]
+        ld_sample <- father_dat[father_dat[, cf_tree$nodes[[father_index]]$split_variable] <= cf_tree$nodes[[father_index]]$split_value,]$id
+        rd_sample <- father_dat[father_dat[, cf_tree$nodes[[father_index]]$split_variable] > cf_tree$nodes[[father_index]]$split_value,]$id
+        
+        if (cf_tree$nodes[[i]]$index == cf_tree$nodes[[father_index]]$left_child){
+          cf_tree$nodes[[i]]$samples <- ld_sample
+          cf_tree$nodes[[i]]$tx_assign <- drawn_sample_w[drawn_sample_w$id %in% ld_sample, ]$tx
+          cf_tree$nodes[[i]]$outcome <- drawn_sample_y[drawn_sample_y$id %in% ld_sample, ]$outcome
+        } else if (cf_tree$nodes[[i]]$index == cf_tree$nodes[[father_index]]$right_child){
+          cf_tree$nodes[[i]]$samples <- rd_sample
+          cf_tree$nodes[[i]]$tx_assign <- drawn_sample_w[drawn_sample_w$id %in% rd_sample, ]$tx
+          cf_tree$nodes[[i]]$outcome <- drawn_sample_y[drawn_sample_y$id %in% rd_sample, ]$outcome
+        }
+      } else {
+        cf_tree$nodes[[i]]$tx_assign <- drawn_sample_w[drawn_sample_w$id %in% cf_tree$nodes[[i]]$samples, ]$tx
+        cf_tree$nodes[[i]]$outcome <- drawn_sample_y[drawn_sample_y$id %in% cf_tree$nodes[[i]]$samples, ]$outcome
+      }
+    } else {
+      cf_tree$nodes[[i]]$samples <- sort(cf_tree$drawn_samples)
+      cf_tree$nodes[[i]]$tx_assign <- drawn_sample_w[drawn_sample_w$id %in% cf_tree$nodes[[i]]$samples, ]$tx
+      cf_tree$nodes[[i]]$outcome <- drawn_sample_y[drawn_sample_y$id %in% cf_tree$nodes[[i]]$samples, ]$outcome
+    }
+  }
+  
+  # estimate the prediction tau for the node
+  for (i in 1:length(cf_tree$nodes)){
+    tmp_df <- data.frame("id" = cf_tree$nodes[[i]]$samples, "tx" = cf_tree$nodes[[i]]$tx_assign, "outcome" = cf_tree$nodes[[i]]$outcome)
+    # print(tmp_df)
+    # print(tmp_df[tmp_df$tx == 1, ]$outcome)
+    # print(tmp_df[tmp_df$tx == 0, ]$outcome)
+    mean_tret <- mean(tmp_df[tmp_df$tx == 1, ]$outcome)
+    mean_ctrl <- mean(tmp_df[tmp_df$tx == 0, ]$outcome)
+    # print(mean_tret)
+    # print(mean_ctrl)
+    tau_prediction <- mean_tret - mean_ctrl
+    # print(tau_prediction)
+    cf_tree$nodes[[i]]$tau_pred <- tau_prediction
+
+    # Any NaN prediction will cause failure in shap calculation.
+    if (is.nan(mean(tmp_df[tmp_df$tx == 1, ]$outcome)) | is.nan(mean(tmp_df[tmp_df$tx == 0, ]$outcome))){
+      # print("drop it!")
+      drop <- T
+      break
+    } else {
+      drop <- F
+    }
+  }
+  
+  # build the data table
+  ld <- c() # left daughter
+  rd <- c() # right daughter
+  sv <- c() # split variable
+  sp <- c() # split point
+  st <- c() # status
+  pred <- c() # tau prediction
+  for (i in 1:length(cf_tree$nodes)){
+    if (!cf_tree$nodes[[i]]$is_leaf){
+      ld <- c(ld, cf_tree$nodes[[i]]$left_child)
+      rd <- c(rd, cf_tree$nodes[[i]]$right_child)
+      sv <- c(sv, colnames(X)[cf_tree$nodes[[i]]$split_variable]) #cf_tree$nodes[[i]]$split_variable
+      sp <- c(sp, cf_tree$nodes[[i]]$split_value)
+    } else {
+      ld <- c(ld, 0)
+      rd <- c(rd, 0)
+      sv <- c(sv, NA)
+      sp <- c(sp, 0.00)
+    }
+    
+    pred <- c(pred, cf_tree$nodes[[i]]$tau_pred)
+  }
+  
+  # print(pred)
+  tree_data <- data.table("left daughter" = ld, "right daughter" = rd, "split var" = sv, "split point" = sp, "prediction" = pred)
+  # tree_data
+  if (drop == F){
+    return(tree_data)
+  } else {
+    return(NULL)
+  }
+}
+
+# getTree <- function (rfobj, k = 1, labelVar = FALSE) 
+# {
+#   if (is.null(rfobj$forest)) {
+#     stop("No forest component in ", deparse(substitute(rfobj)))
+#   }
+#   if (k > rfobj$ntree) {
+#     stop("There are fewer than ", k, "trees in the forest")
+#   }
+#   if (rfobj$type == "regression") {
+#     tree <- cbind(rfobj$forest$leftDaughter[, k], rfobj$forest$rightDaughter[, 
+#                                                                              k], rfobj$forest$bestvar[, k], rfobj$forest$xbestsplit[, 
+#                                                                                                                                     k], rfobj$forest$nodestatus[, k], rfobj$forest$nodepred[, 
+#                                                                                                                                                                                             k])[1:rfobj$forest$ndbigtree[k], ]
+#   }
+#   else {
+#     tree <- cbind(rfobj$forest$treemap[, , k], rfobj$forest$bestvar[, 
+#                                                                     k], rfobj$forest$xbestsplit[, k], rfobj$forest$nodestatus[, 
+#                                                                                                                               k], rfobj$forest$nodepred[, k])[1:rfobj$forest$ndbigtree[k], 
+#                                                                                                                               ]
+#   }
+#   dimnames(tree) <- list(1:nrow(tree), c("left daughter", "right daughter", 
+#                                          "split var", "split point", "status", "prediction"))
+#   if (labelVar) {
+#     tree <- as.data.frame(tree)
+#     v <- tree[[3]]
+#     v[v == 0] <- NA
+#     tree[[3]] <- factor(colnames(tau.forest_rf$X.orig)[v])
+#     if (rfobj$type == "classification") {
+#       v <- tree[[6]]
+#       v[!v %in% 1:nlevels(rfobj$y)] <- NA
+#       tree[[6]] <- levels(rfobj$y)[v]
+#     }
+#   }
+#   tree
+# }
