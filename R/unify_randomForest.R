@@ -92,28 +92,39 @@ randomForest.unify <- function(rf_model, data, W = NULL, Y = NULL, is_grf = FALS
     # if(any(attr(rf_model$terms, "dataClasses") != "numeric")) {
     #   stop('Models built on data with categorical features are not supported - please encode them before training.')
     # }
-    n <- rf_model$'_num_trees'
+
+    # convert cf to rf
+    rf_model_tmp <- cf_to_rf(rf_model, X = data, W = W, Y = Y)
+    rf_model <- rf_model_tmp
+
+    # n <- rf_model$ntree #'_num_trees'
+    # ret <- data.table()
+    # x <- lapply(1:n, function(tree){
+    #   cf_tree <- grf::get_tree(rf_model, index = tree)
+    #   tree_data <- get_cftree(cf_tree, data, W, Y)
+    # })
+
+    # x <- x[-which(sapply(x, is.null))]
+    # cf$ntree <- length(x)
+    
+    # na_idx <- c()
+    # for (i in 1:length(x)){
+    #   if (sum( is.na( x[[i]]$prediction ) ) > 0){
+    #     na_idx <- c(na_idx, i)
+    #   }
+    # }
+    
+    # for (i in na_idx){
+    #   x[[i]] <- NULL
+    # }
+    # n <- length(x)
+    
+    n <- rf_model$ntree
     ret <- data.table()
     x <- lapply(1:n, function(tree){
-      cf_tree <- grf::get_tree(rf_model, index = tree)
-      tree_data <- get_cftree(cf_tree, data, W, Y)
+      tree_data <- as.data.table(getTree(rf_model, k = tree, labelVar = TRUE)) # lv = T
+      tree_data[, c("left daughter", "right daughter", "split var", "split point", "prediction")]
     })
-
-    x <- x[-which(sapply(x, is.null))]
-    cf$ntree <- length(x)
-    
-    na_idx <- c()
-    for (i in 1:length(x)){
-      if (sum( is.na( x[[i]]$prediction ) ) > 0){
-        na_idx <- c(na_idx, i)
-      }
-    }
-    
-    for (i in na_idx){
-      x[[i]] <- NULL
-    }
-    n <- length(x)
-    
     times_vec <- sapply(x, nrow)
     y <- rbindlist(x)
     y[, Tree := rep(0:(n - 1), times = times_vec)]
@@ -270,6 +281,89 @@ get_cftree <- function(cf_tree, X, W, Y){
   } else {
     return(NULL)
   }
+}
+
+cf_to_rf <- function(cf, X, W, Y){
+  cf$type <- "regression"
+  cf$ntree <- tau.forest$'_num_trees'
+  cf$forest <- list()
+  n <- cf$ntree
+  
+  x <- lapply(1:n, function(tree){
+    cf_tree <- grf::get_tree(cf, index = tree)
+    tree_data <- get_cftree(cf_tree, X, W, Y)
+  })
+  
+  x <- x[-which(sapply(x, is.null))]
+  cf$ntree <- length(x)
+  
+  # join left daughter
+  ld <- x[[1]]$`left daughter`
+  rd <- x[[1]]$`right daughter`
+  ndbt <- c(dim(x[[1]])[1])
+  np <- x[[1]]$prediction
+  xbs <- x[[1]]$`split point`
+  bv <- x[[1]]$`split var`
+  for (i in 2:length(x)){
+    ld <- rowr::cbind.fill(ld, x[[i]]$`left daughter`, fill = 0)
+    rd <- rowr::cbind.fill(rd, x[[i]]$`right daughter`, fill = 0)
+    ndbt <- c(ndbt, dim(x[[i]])[1])
+    np <- rowr::cbind.fill(np, x[[i]]$prediction, fill = 0)
+    xbs <- rowr::cbind.fill(xbs, x[[i]]$`split point`, fill = 0)
+    bv <- rowr::cbind.fill(bv, x[[i]]$`split var`, fill = NA)
+  }
+  
+  ld <- as.matrix(ld)
+  mode(ld) <- "integer"
+  
+  rd <- as.matrix(rd)
+  mode(rd) <- "integer"
+  
+  bv <- as.data.frame(lapply(bv, as.factor))
+  # bv <- as.matrix(bv)
+  # mode(bv) <- "character"
+  # bv[is.na(bv)] <- 0
+  
+  colnames(ld) <- seq(1, dim(ld)[2])
+  colnames(rd) <- seq(1, dim(rd)[2])
+  colnames(np) <- seq(1, dim(np)[2])
+  colnames(xbs) <- seq(1, dim(xbs)[2])
+  colnames(bv) <- seq(1, dim(bv)[2])
+  
+  colnames(ld) <- NULL
+  colnames(rd) <- NULL
+  
+  xbs <- as.matrix(xbs)
+  colnames(xbs) <- NULL
+  
+  bv_tmp <- matrix(, nrow = dim(bv)[1], ncol = dim(bv)[2])
+  
+  for (i in 1:dim(bv)[1]){
+    for (j in 1:dim(bv)[2]){
+      if (!is.na(bv[i, j])){
+        bv_tmp[i,j] <- which(colnames(X) == bv[i, j])
+      } else {
+        bv_tmp[i,j] <- 0
+      }
+    }
+  }
+  
+  np <- as.matrix(np)
+  colnames(np) <- NULL
+  
+  cf$forest$leftDaughter <- ld
+  cf$forest$rightDaughter <- rd
+  cf$forest$bestvar <- bv_tmp
+  cf$forest$xbestsplit <- xbs
+  cf$forest$ndbigtree <- ndbt
+  cf$forest$nodepred <- np
+  
+  cf$forest$nodestatus <- ld
+  
+  cf$importance <- data.frame("IncNodePurity" = rep(0, dim(X)[2]))
+  row.names(cf$importance) <- colnames(X)
+  class(cf) <- "causal_forest"
+  return(cf)
 }
 
 # getTree <- function (rfobj, k = 1, labelVar = FALSE) 
