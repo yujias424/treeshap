@@ -37,7 +37,7 @@
 #' shaps <- treeshap(unified_model, data[1:2,])
 #' # plot_contribution(shaps, obs = 1)
 #'
-randomForest.unify <- function(rf_model, data, W = NULL, Y = NULL, is_grf = FALSE) {
+randomForest.unify <- function(rf_model, data, W = NULL, Y = NULL, is_grf = FALSE, numCores = 8) {
   if (is_grf == FALSE){
     if(!'randomForest' %in% class(rf_model)){stop('Object rf_model was not of class "randomForest"')}
     if(any(attr(rf_model$terms, "dataClasses") != "numeric")) {
@@ -94,8 +94,10 @@ randomForest.unify <- function(rf_model, data, W = NULL, Y = NULL, is_grf = FALS
     # }
 
     # convert cf to rf
-    rf_model_tmp <- cf_to_rf(rf_model, X = data, W = W, Y = Y)
+    rf_model_tmp <- cf_to_rf(rf_model, X = data, W = W, Y = Y, numCores = numCores)
     rf_model <- rf_model_tmp
+
+    print("convert successfully")
 
     # n <- rf_model$ntree #'_num_trees'
     # ret <- data.table()
@@ -283,36 +285,157 @@ get_cftree <- function(cf_tree, X, W, Y){
   }
 }
 
-cf_to_rf <- function(cf, X, W, Y){
+cf_to_rf <- function(cf, X, W, Y, numCores = 8){
   cf$type <- "regression"
-  cf$ntree <- tau.forest$'_num_trees'
+  cf$ntree <- cf$'_num_trees'
   cf$forest <- list()
   n <- cf$ntree
   
-  x <- lapply(1:n, function(tree){
-    cf_tree <- grf::get_tree(cf, index = tree)
-    tree_data <- get_cftree(cf_tree, X, W, Y)
-  })
+  print("start mc step 1")
+  start.time <- Sys.time()
+  if (numCores > 1){
+
+    # cl <- makeCluster(numCores)
+    # registerDoParallel(cl)
+
+    # x <- foreach(tree = 1:n) %dopar% {
+    #   cf_tree <- grf::get_tree(cf, index = tree)
+    #   tree_data <- get_cftree(cf_tree, X, W, Y)
+    #   tree_data
+    # }
+
+    # stopCluster(cl)
+
+    # x <- lapply(1:n, function(tree){
+    #   cf_tree <- grf::get_tree(cf, index = tree)
+    #   tree_data <- get_cftree(cf_tree, X, W, Y)
+    # })
+
+    x <- mclapply(1:n, function(tree){
+      cf_tree <- grf::get_tree(cf, index = tree)
+      tree_data <- get_cftree(cf_tree, X, W, Y)
+    }, mc.cores = numCores)
+
+  } else {
+    x <- lapply(1:n, function(tree){
+      cf_tree <- grf::get_tree(cf, index = tree)
+      tree_data <- get_cftree(cf_tree, X, W, Y)
+    })
+  }
+  end.time <- Sys.time()
+  print("end mc step 1")
+  time.taken <- end.time - start.time
+  print(time.taken)
   
+  # There may exist some NULL object in the list
   x <- x[-which(sapply(x, is.null))]
   cf$ntree <- length(x)
   
-  # join left daughter
-  ld <- x[[1]]$`left daughter`
-  rd <- x[[1]]$`right daughter`
-  ndbt <- c(dim(x[[1]])[1])
-  np <- x[[1]]$prediction
-  xbs <- x[[1]]$`split point`
-  bv <- x[[1]]$`split var`
-  for (i in 2:length(x)){
-    ld <- rowr::cbind.fill(ld, x[[i]]$`left daughter`, fill = 0)
-    rd <- rowr::cbind.fill(rd, x[[i]]$`right daughter`, fill = 0)
-    ndbt <- c(ndbt, dim(x[[i]])[1])
-    np <- rowr::cbind.fill(np, x[[i]]$prediction, fill = 0)
-    xbs <- rowr::cbind.fill(xbs, x[[i]]$`split point`, fill = 0)
-    bv <- rowr::cbind.fill(bv, x[[i]]$`split var`, fill = NA)
+  print("start mc step 2")
+  start.time <- Sys.time()
+  if(numCores <= 1){
+    # join left daughter
+    ld <- x[[1]]$`left daughter`
+    rd <- x[[1]]$`right daughter`
+    ndbt <- c(dim(x[[1]])[1])
+    np <- x[[1]]$prediction
+    xbs <- x[[1]]$`split point`
+    bv <- x[[1]]$`split var`
+    for (i in 2:length(x)){
+      ld <- rowr::cbind.fill(ld, x[[i]]$`left daughter`, fill = 0)
+      rd <- rowr::cbind.fill(rd, x[[i]]$`right daughter`, fill = 0)
+      ndbt <- c(ndbt, dim(x[[i]])[1])
+      np <- rowr::cbind.fill(np, x[[i]]$prediction, fill = 0)
+      xbs <- rowr::cbind.fill(xbs, x[[i]]$`split point`, fill = 0)
+      bv <- rowr::cbind.fill(bv, x[[i]]$`split var`, fill = NA)
+    }
+  } else {
+
+    # get the max length of target var
+    ld_len_max <- max(unlist(lapply(x, function(x) length(x$`left daughter`))))
+    rd_len_max <- max(unlist(lapply(x, function(x) length(x$`right daughter`))))
+    np_len_max <- max(unlist(lapply(x, function(x) length(x$prediction))))
+    xbs_len_max <- max(unlist(lapply(x, function(x) length(x$`split point`))))
+    bv_len_max <- max(unlist(lapply(x, function(x) length(x$`split var`))))
+
+    ld_list <- lapply(x, function(x) {
+        tmp <- x$`left daughter`
+        length(tmp) <- ld_len_max
+        tmp
+      })
+    
+    ld_list <- rapply(ld_list, f=function(x) ifelse(is.na(x), 0, x), how="replace")
+
+    rd_list <- lapply(x, function(x) {
+        tmp <- x$`right daughter`
+        length(tmp) <- rd_len_max
+        tmp
+      })
+    
+    rd_list <- rapply(rd_list, f=function(x) ifelse(is.na(x), 0, x), how="replace")
+
+    np_list <- lapply(x, function(x) {
+        tmp <- x$prediction
+        length(tmp) <- np_len_max
+        tmp
+      })
+
+    np_list <- rapply(np_list, f=function(x) ifelse(is.na(x), 0, x), how="replace")
+
+    xbs_list <- lapply(x, function(x) {
+        tmp <- x$`split point`
+        length(tmp) <- xbs_len_max
+        tmp
+      })
+
+    xbs_list <- rapply(xbs_list, f=function(x) ifelse(is.na(x), 0, x), how="replace")
+
+    bv_list <- lapply(x, function(x) {
+        tmp <- x$`split var`
+        length(tmp) <- bv_len_max
+        tmp
+      })
+
+    ndbt <- c()
+    for (i in 1:length(x)){
+      ndbt <- c(ndbt, dim(x[[i]])[1])
+    }
+
+    # cl <- makeCluster(numCores)
+    # registerDoParallel(cl)
+
+    # ndbt <- foreach(i = 1:length(x), .combine=c) %dopar% dim(x[[i]])[1]
+
+    # stopCluster(cl)
+
+    # list to dataframe
+    ld <- data.frame(matrix(unlist(ld_list), ncol = length(x)))
+    rd <- data.frame(matrix(unlist(rd_list), ncol = length(x)))
+    np <- data.frame(matrix(unlist(np_list), ncol = length(x)))
+    xbs <- data.frame(matrix(unlist(xbs_list), ncol = length(x)))
+    bv <- data.frame(matrix(unlist(bv_list), ncol = length(x)))
+
+    # # a mc version
+    # ld <- foreach(i = 1:length(x), .combine=function(x, y)cbind.fill(x, y, fill = 0)) %dopar% x[[i]]$`left daughter`
+    # rd <- foreach(i = 1:length(x), .combine=function(x, y)cbind.fill(x, y, fill = 0)) %dopar% x[[i]]$`right daughter`
+    # ndbt <- foreach(i = 1:length(x), .combine=c) %dopar% dim(x[[i]])[1]
+    # np <- foreach(i = 1:length(x), .combine=function(x, y)cbind.fill(x, y, fill = 0)) %dopar% x[[i]]$prediction
+    # xbs <- foreach(i = 1:length(x), .combine=function(x, y)cbind.fill(x, y, fill = 0)) %dopar% x[[i]]$`split point`
+    # bv <- foreach(i = 1:length(x), .combine=function(x, y)cbind.fill(x, y, fill = NA)) %dopar% x[[i]]$`split var`
+
   }
-  
+
+  end.time <- Sys.time()
+  print("end mc step 2")
+  time.taken <- end.time - start.time
+  print(time.taken)
+
+  colnames(ld) <- seq(1, dim(ld)[2])
+  colnames(rd) <- seq(1, dim(rd)[2])
+  colnames(np) <- seq(1, dim(np)[2])
+  colnames(xbs) <- seq(1, dim(xbs)[2])
+  colnames(bv) <- seq(1, dim(bv)[2])
+
   ld <- as.matrix(ld)
   mode(ld) <- "integer"
   
@@ -320,15 +443,12 @@ cf_to_rf <- function(cf, X, W, Y){
   mode(rd) <- "integer"
   
   bv <- as.data.frame(lapply(bv, as.factor))
+
   # bv <- as.matrix(bv)
   # mode(bv) <- "character"
   # bv[is.na(bv)] <- 0
   
-  colnames(ld) <- seq(1, dim(ld)[2])
-  colnames(rd) <- seq(1, dim(rd)[2])
-  colnames(np) <- seq(1, dim(np)[2])
-  colnames(xbs) <- seq(1, dim(xbs)[2])
-  colnames(bv) <- seq(1, dim(bv)[2])
+  
   
   colnames(ld) <- NULL
   colnames(rd) <- NULL
