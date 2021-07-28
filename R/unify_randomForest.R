@@ -169,7 +169,7 @@ randomForest.unify <- function(rf_model, data, W = NULL, Y = NULL, is_grf = FALS
   
 }
 
-get_cftree <- function(cf_tree, X, W, Y){
+get_cftree <- function(cf_tree, X, W, Y, forest){
   
   # get drawn dat
   drawn_sample_dat <- as.data.frame(X[sort(cf_tree$drawn_samples), ])
@@ -230,26 +230,30 @@ get_cftree <- function(cf_tree, X, W, Y){
   
   # estimate the prediction tau for the node
   for (i in 1:length(cf_tree$nodes)){
-    tmp_df <- data.frame("id" = cf_tree$nodes[[i]]$samples, "tx" = cf_tree$nodes[[i]]$tx_assign, "outcome" = cf_tree$nodes[[i]]$outcome)
-    # print(tmp_df)
-    # print(tmp_df[tmp_df$tx == 1, ]$outcome)
-    # print(tmp_df[tmp_df$tx == 0, ]$outcome)
-    mean_tret <- mean(tmp_df[tmp_df$tx == 1, ]$outcome)
-    mean_ctrl <- mean(tmp_df[tmp_df$tx == 0, ]$outcome)
-    # print(mean_tret)
-    # print(mean_ctrl)
-    tau_prediction <- mean_tret - mean_ctrl
-    # print(tau_prediction)
-    cf_tree$nodes[[i]]$tau_pred <- tau_prediction
 
-    # Any NaN prediction will cause failure in shap calculation.
-    if (is.nan(mean(tmp_df[tmp_df$tx == 1, ]$outcome)) | is.nan(mean(tmp_df[tmp_df$tx == 0, ]$outcome))){
-      # print("drop it!")
-      drop <- T
-      break
-    } else {
-      drop <- F
-    }
+    # # old version
+    # tmp_df <- data.frame("id" = cf_tree$nodes[[i]]$samples, "tx" = cf_tree$nodes[[i]]$tx_assign, "outcome" = cf_tree$nodes[[i]]$outcome)
+
+    # mean_tret <- mean(tmp_df[tmp_df$tx == 1, ]$outcome)
+    # mean_ctrl <- mean(tmp_df[tmp_df$tx == 0, ]$outcome)
+
+    # tau_prediction <- mean_tret - mean_ctrl
+
+    # cf_tree$nodes[[i]]$tau_pred <- tau_prediction
+
+    # # Any NaN prediction will cause failure in shap calculation.
+    # if (is.nan(mean(tmp_df[tmp_df$tx == 1, ]$outcome)) | is.nan(mean(tmp_df[tmp_df$tx == 0, ]$outcome))){
+    #   drop <- T
+    #   break
+    # } else {
+    #   drop <- F
+    # }
+
+    Y.centered = Y[cf_tree$nodes[[i]]$samples] - forest$Y.hat[cf_tree$nodes[[i]]$samples]
+    W.centered = W[cf_tree$nodes[[i]]$samples] - forest$W.hat[cf_tree$nodes[[i]]$samples]
+    value = cov(Y.centered, W.centered)/var(W.centered)
+    cf_tree$nodes[[i]]$tau_pred <- value
+
   }
   
   # build the data table
@@ -278,14 +282,15 @@ get_cftree <- function(cf_tree, X, W, Y){
   # print(pred)
   tree_data <- data.table("left daughter" = ld, "right daughter" = rd, "split var" = sv, "split point" = sp, "prediction" = pred)
   # tree_data
-  if (drop == F){
-    return(tree_data)
-  } else {
-    return(NULL)
-  }
+  return(tree_data)
+  # if (drop == F){
+  #   return(tree_data)
+  # } else {
+  #   return(NULL)
+  # }
 }
 
-cf_to_rf <- function(cf, X, W, Y, numCores = 8){
+cf_to_rf <- function(cf, X, W, Y, numCores = 8, forest){
   cf$type <- "regression"
   cf$ntree <- cf$'_num_trees'
   cf$forest <- list()
@@ -313,13 +318,13 @@ cf_to_rf <- function(cf, X, W, Y, numCores = 8){
 
     x <- mclapply(1:n, function(tree){
       cf_tree <- grf::get_tree(cf, index = tree)
-      tree_data <- get_cftree(cf_tree, X, W, Y)
+      tree_data <- get_cftree(cf_tree, X, W, Y, cf)
     }, mc.cores = numCores)
 
   } else {
     x <- lapply(1:n, function(tree){
       cf_tree <- grf::get_tree(cf, index = tree)
-      tree_data <- get_cftree(cf_tree, X, W, Y)
+      tree_data <- get_cftree(cf_tree, X, W, Y, cf)
     })
   }
   end.time <- Sys.time()
@@ -328,7 +333,7 @@ cf_to_rf <- function(cf, X, W, Y, numCores = 8){
   print(time.taken)
   
   # There may exist some NULL object in the list
-  x <- x[-which(sapply(x, is.null))]
+  # x <- x[-which(sapply(x, is.null))]
   cf$ntree <- length(x)
   
   print("start mc step 2")
